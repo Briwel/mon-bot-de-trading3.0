@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Explication du Bot de Trading</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css">
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans leading-relaxed">
+    <div class="container mx-auto p-6 md:p-12 lg:p-24 max-w-4xl">
+        <div class="bg-gray-800 p-8 md:p-10 rounded-xl shadow-lg">
+
+            <h1 class="text-4xl md:text-5xl font-extrabold text-white text-center mb-6">Explication du Bot de Trading</h1>
+            <p class="text-lg text-gray-400 text-center mb-8">
+                Ce document explique le fonctionnement du bot de trading conçu pour automatiser les transactions sur la paire BTC/USDT en se basant sur une stratégie d'analyse technique.
+            </p>
+
+            <div class="w-full h-px bg-gray-700 my-8"></div>
+
+            <!-- Trading Strategies Section -->
+            <section class="mb-10">
+                <h2 class="text-2xl md:text-3xl font-bold text-white mb-4"><i class="fas fa-chart-line text-blue-400 mr-2"></i>Stratégies de Trading</h2>
+                <p class="text-gray-300">
+                    Le bot utilise une stratégie de "scalping" à court terme en se basant sur trois indicateurs techniques principaux : les <strong class="text-blue-400">Moyennes Mobiles (MA)</strong>, l'<strong class="text-blue-400">Indice de Force Relative (RSI)</strong> et les <strong class="text-blue-400">Bandes de Bollinger</strong>.
+                </p>
+
+                <div class="mt-6">
+                    <h3 class="text-xl font-semibold text-white mb-3">Stratégie d'Achat</h3>
+                    <ul class="list-disc list-inside space-y-2 text-gray-300">
+                        <li><strong class="text-green-400">Croisement des Moyennes Mobiles (MA)</strong> : La moyenne mobile à court terme (MA courte, 20 périodes) doit être supérieure à la moyenne mobile à long terme (MA longue, 50 périodes).</li>
+                        <li><strong class="text-green-400">Indice de Force Relative (RSI)</strong> : L'Indice de Force Relative (RSI, 14 périodes) doit être inférieur à 70.</li>
+                        <li><strong class="text-green-400">Indicateur des Bandes de Bollinger</strong> : Le prix actuel doit être inférieur à la bande supérieure des Bandes de Bollinger.</li>
+                    </ul>
+                </div>
+
+                <div class="mt-6">
+                    <h3 class="text-xl font-semibold text-white mb-3">Stratégie de Vente</h3>
+                    <ul class="list-disc list-inside space-y-2 text-gray-300">
+                        <li><strong class="text-red-400">Take Profit</strong> : Le prix actuel atteint un seuil de profit défini, déclenchant la prise de bénéfices.</li>
+                        <li><strong class="text-red-400">Stop Loss</strong> : Le prix chute en dessous d'un seuil de perte prédéfini, ce qui permet de limiter les pertes.</li>
+                    </ul>
+                </div>
+            </section>
+
+            <div class="w-full h-px bg-gray-700 my-8"></div>
+
+            <!-- Code Logic Section -->
+            <section class="mb-10">
+                <h2 class="text-2xl md:text-3xl font-bold text-white mb-4"><i class="fas fa-cogs text-blue-400 mr-2"></i>Logique du Code</h2>
+                <div class="mb-6">
+                    <h3 class="text-xl font-semibold text-white mb-3">1. Structure</h3>
+                    <p class="text-gray-300">Le code est organisé en plusieurs fonctions pour une meilleure lisibilité :</p>
+                    <ul class="list-disc list-inside space-y-2 text-gray-300 mt-2">
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">load_config()</code> : Charge les paramètres depuis le fichier de configuration.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">load_state()</code> : Charge l'état du bot depuis <code class="bg-gray-700 rounded-md px-1 py-0.5">bot_state.json</code>.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">save_state()</code> : Sauvegarde l'état actuel du bot.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">fetch_data_and_indicators()</code> : Récupère les données et calcule les indicateurs.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">check_buy_signal()</code> : Vérifie les conditions d'achat.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">check_sell_signal()</code> : Vérifie les conditions de vente.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">execute_trade()</code> : Exécute les ordres via l'API.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">run_bot_logic()</code> : Contient la logique principale.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">main()</code> : La fonction principale qui gère le traitement en parallèle.</li>
+                    </ul>
+                </div>
+                <div>
+                    <h3 class="text-xl font-semibold text-white mb-3">2. Flux d'exécution</h3>
+                    <ol class="list-decimal list-inside space-y-2 text-gray-300">
+                        <li><strong class="text-blue-400">Initialisation</strong> : Le bot charge la configuration et se connecte à l'API.</li>
+                        <li><strong class="text-blue-400">Boucle de paires</strong> : Il parcourt chaque paire de trading définie.</li>
+                        <li><strong class="text-blue-400">Récupération des données</strong> : Pour chaque paire, il récupère les données de marché les plus récentes.</li>
+                        <li><strong class="text-blue-400">Analyse des signaux</strong> : Il vérifie les signaux d'achat et de vente.</li>
+                        <li><strong class="text-blue-400">Mise à jour de l'état</strong> : L'état du bot est mis à jour après chaque transaction.</li>
+                        <li><strong class="text-blue-400">Pause</strong> : Le bot se met en veille avant de répéter le processus.</li>
+                    </ol>
+                </div>
+            </section>
+
+            <div class="w-full h-px bg-gray-700 my-8"></div>
+
+            <!-- Resilience Section -->
+            <section>
+                <h2 class="text-2xl md:text-3xl font-bold text-white mb-4"><i class="fas fa-shield-alt text-blue-400 mr-2"></i>Résilience et gestion d'erreurs</h2>
+                <ul class="list-disc list-inside space-y-2 text-gray-300">
+                    <li><strong class="text-yellow-400">Variables d'environnement</strong> : Les clés API sont chargées depuis des variables d'environnement pour des raisons de sécurité.</li>
+                    <li><strong class="text-yellow-400">Gestion des erreurs de l'API</strong> : Le bot incrémente un compteur en cas d'échec de l'API. S'il dépasse un seuil, le traitement de la paire est mis en pause sans arrêter le bot.</li>
+                    <li><strong class="text-yellow-400">Gestion des transactions</strong> : Des vérifications sont effectuées avant chaque transaction pour s'assurer que les fonds sont suffisants.</li>
+                </ul>
+            </section>
+        </div>
+    </div>
+</body>
+</html>

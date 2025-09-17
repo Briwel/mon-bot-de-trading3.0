@@ -1,0 +1,18 @@
+{
+    "last_transaction_type": "SELL",
+    "last_buy_price": 0.0,
+    "max_price_since_buy": 0.0,
+    "consecutive_api_failures": 0,
+    "BTC/USDT": {
+        "last_transaction_type": "SELL",
+        "last_buy_price": 0.0,
+        "max_price_since_buy": 0.0,
+        "consecutive_api_failures": 0
+    },
+    "ETH/USDT": {
+        "last_transaction_type": "BUY",
+        "last_buy_price": 3500.25,
+        "max_price_since_buy": 4708.06,
+        "consecutive_api_failures": 0
+    }
+}

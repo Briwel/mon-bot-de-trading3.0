@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot de Trading en Direct</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700&family=Roboto:wght@400;700&display=swap');
+        
+        body {
+            font-family: 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #1f2937 0%, #0f172a 100%);
+        }
+        .container-card {
+            background-color: #1a202c;
+            border-radius: 1rem;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        h1 {
+            font-family: 'Montserrat', sans-serif;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <!-- Main Container -->
+    <div class="w-full max-w-5xl mx-auto p-8 text-gray-200 container-card">
+        <h1 class="text-5xl font-extrabold text-center text-green-400 mb-8 tracking-wide">Bot de Trading en Direct</h1>
+        
+        <!-- Explanation Section -->
+        <div class="grid md:grid-cols-2 gap-8 mb-8">
+            <div class="p-6 bg-gray-800 rounded-lg border border-gray-700 hover:border-green-500 transition-all duration-300">
+                <h2 class="text-3xl font-bold text-gray-50 mb-4 border-b-2 border-green-500 pb-2 flex items-center">
+                    <svg class="w-8 h-8 mr-3 text-green-400" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                    </svg>
+                    Explication du Bot
+                </h2>
+                <p class="text-gray-300">Ce document explique le fonctionnement du bot de trading en direct que nous avons développé. Il est conçu pour automatiser les transactions sur la paire BTC/USDT en se basant sur une stratégie d'analyse technique.</p>
+            </div>
+
+            <!-- Code Explanation Section -->
+            <div class="p-6 bg-gray-800 rounded-lg border border-gray-700 hover:border-green-500 transition-all duration-300">
+                <h2 class="text-3xl font-bold text-gray-50 mb-4 border-b-2 border-green-500 pb-2 flex items-center">
+                    <svg class="w-8 h-8 mr-3 text-green-400" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM8 17h8v2H8v-2zm0-4h8v2H8v-2zm-2-4h12V9H6V7z"/>
+                    </svg>
+                    Explication du Code
+                </h2>
+                <div class="space-y-4 text-gray-300">
+                    <p><strong>Initialisation de l'échange :</strong> Le bot se connecte à Binance en utilisant les clés API que vous avez fournies.</p>
+                    <p><strong>Boucle `while True` :</strong> Cette boucle fait tourner le bot en continu. À chaque itération, elle exécute les étapes suivantes :</p>
+                    <ul class="list-none space-y-2 pl-4">
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <span><strong>Récupération des données en temps réel :</strong> Le bot appelle `get_ohlcv()` pour obtenir les dernières données de prix.</span>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <span><strong>Calcul des indicateurs :</strong> Il utilise `talib` pour calculer le croisement des moyennes mobiles (`ma_short`, `ma_long`), l'indice de force relative (`rsi`) et les Bandes de Bollinger (`upper_band`, `lower_band`).</span>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <span><strong>Logique de trading :</strong> Le bot vérifie les conditions d'achat et de vente, puis place les ordres.</span>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <span><strong>Pause :</strong> Le bot fait une pause de 60 secondes pour ne pas surcharger les serveurs.</span>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <span><strong>Gestion des erreurs :</strong> Les blocs `try...except` entourent les opérations critiques pour que le bot ne s'arrête pas en cas de problème.</span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <hr class="my-8 border-gray-700">
+
+        <!-- Trading Strategies Section -->
+        <div class="p-8 bg-gray-800 rounded-lg border border-gray-700">
+            <h2 class="text-3xl font-bold text-gray-50 mb-6 border-b-2 border-green-500 pb-2 flex items-center">
+                <svg class="w-8 h-8 mr-3 text-green-400" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/>
+                </svg>
+                Stratégies de Trading
+            </h2>
+            <div class="grid md:grid-cols-2 gap-8">
+                <!-- Buy Strategy -->
+                <div class="p-6 bg-gray-700 rounded-lg border border-gray-600 transition-transform transform hover:scale-105">
+                    <h3 class="text-2xl font-semibold text-green-400 mb-4 flex items-center">
+                        <svg class="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 2L4 9v11h16V9L12 2zm-1 15h2v-6h-2v6zm0-8h2V7h-2v2z"/>
+                        </svg>
+                        Stratégie d'achat
+                    </h3>
+                    <ul class="list-none space-y-4 text-gray-300">
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <p>
+                                <strong class="text-green-400">Croisement des Moyennes Mobiles (MA)</strong> : La MA courte (20 périodes) doit être supérieure à la MA longue (50 périodes).
+                            </p>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <p>
+                                <strong class="text-green-400">Indice de Force Relative (RSI)</strong> : Le RSI (14 périodes) doit être inférieur à 70 pour éviter le surachat.
+                            </p>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <p>
+                                <strong class="text-green-400">Bandes de Bollinger</strong> : Le prix actuel doit être inférieur à la bande supérieure pour éviter les sommets de volatilité.
+                            </p>
+                        </li>
+                    </ul>
+                </div>
+                
+                <!-- Sell Strategy -->
+                <div class="p-6 bg-gray-700 rounded-lg border border-gray-600 transition-transform transform hover:scale-105">
+                    <h3 class="text-2xl font-semibold text-red-400 mb-4 flex items-center">
+                        <svg class="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 22L20 15V4h-6V2H10v2H4v11l8 7z"/>
+                        </svg>
+                        Stratégie de vente
+                    </h3>
+                    <ul class="list-none space-y-4 text-gray-300">
+                        <li class="flex items-start">
+                            <span class="text-red-400 mr-2 flex-shrink-0">•</span>
+                            <p>
+                                <strong class="text-red-400">Prise de profit (Take Profit)</strong> : Vente si le prix atteint 5% au-dessus du prix d'achat.
+                            </p>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-red-400 mr-2 flex-shrink-0">•</span>
+                            <p>
+                                <strong class="text-red-400">Stop-loss suiveur</strong> : Vente si le prix baisse de plus de 5% par rapport à un sommet atteint.
+                            </p>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-red-400 mr-2 flex-shrink-0">•</span>
+                            <p>
+                                <strong class="text-red-400">Inversion de la tendance</strong> : Vente si la MA courte repasse en dessous de la MA longue, ou si le RSI est suracheté.
+                            </p>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
