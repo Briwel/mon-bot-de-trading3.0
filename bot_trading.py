@@ -49,24 +49,30 @@ def save_state(state):
     except IOError as e:
         logging.error(f"Erreur lors de la sauvegarde de l'état du bot : {e}")
 
+def _default_symbol_state():
+    """Retourne l'état initial par défaut pour un symbole."""
+    return {
+        'last_transaction_type': 'SELL',
+        'last_buy_price': 0.0,
+        'max_price_since_buy': 0.0,
+        'consecutive_api_failures': 0
+    }
+
 def load_state():
     """Charge l'état du bot depuis un fichier JSON. Initialise l'état si le fichier n'existe pas."""
+    state = {}
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
-                return json.load(f)
+                state = json.load(f)
     except (IOError, json.JSONDecodeError) as e:
         logging.error(f"Erreur lors du chargement de l'état du bot : {e}")
-    
-    initial_state = {}
+
+    # S'assurer que chaque symbole actif a bien son entrée (p. ex. si un nouveau symbole est ajouté)
     for symbol in SYMBOLS:
-        initial_state[symbol] = {
-            'last_transaction_type': 'SELL',
-            'last_buy_price': 0.0,
-            'max_price_since_buy': 0.0,
-            'consecutive_api_failures': 0
-        }
-    return initial_state
+        if symbol not in state:
+            state[symbol] = _default_symbol_state()
+    return state
 
 def get_ohlcv(exchange, symbol, timeframe, limit):
     """Récupère les données OHLCV pour un symbole donné."""
@@ -96,15 +102,18 @@ def get_balance_for_currency(balance, currency):
 
 def log_trade_to_csv(trade_data):
     """Enregistre les détails d'une transaction dans un fichier CSV."""
-    header_exists = os.path.exists(TRADE_HISTORY_FILE)
-    with open(TRADE_HISTORY_FILE, 'a', newline='') as csvfile:
-        fieldnames = ['timestamp', 'symbol', 'type', 'price', 'amount', 'total', 'fees']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    try:
+        header_exists = os.path.exists(TRADE_HISTORY_FILE)
+        with open(TRADE_HISTORY_FILE, 'a', newline='') as csvfile:
+            fieldnames = ['timestamp', 'symbol', 'type', 'price', 'amount', 'total', 'fees']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
-        if not header_exists:
-            writer.writeheader()
-        
-        writer.writerow(trade_data)
+            if not header_exists:
+                writer.writeheader()
+            
+            writer.writerow(trade_data)
+    except IOError as e:
+        logging.error(f"Erreur lors de l'enregistrement du trade dans le CSV : {e}")
 
 def log_current_balances(balance, symbols):
     """Affiche le solde des devises pertinentes."""
@@ -152,13 +161,14 @@ def handle_buy_signal(exchange, symbol, current_state, last_price, balance):
 
             order = None
             if PAPER_TRADING_MODE:
+                filled_amount = float(amount_to_buy)
                 order = {
                     'status': 'closed',
-                    'filled': float(amount_to_buy),
+                    'filled': filled_amount,
                     'price': last_price,
-                    'fee': {'cost': float(amount_to_buy) * TRANSACTION_FEES}
+                    'fee': {'cost': filled_amount * TRANSACTION_FEES}
                 }
-                logging.info(f"[MODE SIMULATION] Ordre d'achat simulé pour {symbol}. Montant: {amount_to_buy:.4f}")
+                logging.info(f"[MODE SIMULATION] Ordre d'achat simulé pour {symbol}. Montant: {filled_amount:.4f}")
             else:
                 order = exchange.create_market_buy_order(symbol, amount_to_buy)
                 time.sleep(1) # Délai pour que l'ordre soit traité
@@ -206,13 +216,14 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
 
                 order = None
                 if PAPER_TRADING_MODE:
+                    filled_amount = float(amount_to_sell)
                     order = {
                         'status': 'closed',
-                        'filled': float(amount_to_sell),
+                        'filled': filled_amount,
                         'price': last_price,
-                        'fee': {'cost': float(amount_to_sell) * TRANSACTION_FEES}
+                        'fee': {'cost': filled_amount * TRANSACTION_FEES}
                     }
-                    logging.info(f"[MODE SIMULATION] Ordre de vente simulé pour {symbol}. Montant: {amount_to_sell:.4f}")
+                    logging.info(f"[MODE SIMULATION] Ordre de vente simulé pour {symbol}. Montant: {filled_amount:.4f}")
                 else:
                     order = exchange.create_market_sell_order(symbol, amount_to_sell)
                     time.sleep(1) # Délai pour que l'ordre soit traité
@@ -220,6 +231,8 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
 
                 if order and order.get('filled', 0) > 0:
                     current_state['last_transaction_type'] = 'SELL'
+                    current_state['last_buy_price'] = 0.0
+                    current_state['max_price_since_buy'] = 0.0
                     trade_data = {
                         'timestamp': datetime.now().isoformat(),
                         'symbol': symbol,
@@ -241,18 +254,28 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
 def run_bot_logic(exchange, symbol, state, balance):
     """Contient la logique principale du bot pour un symbole donné."""
     current_state = state[symbol]
+
+    # Vérifier si ce symbole est en pause temporaire après trop d'échecs API
+    pause_until = current_state.get('pause_until', 0)
+    if time.time() < pause_until:
+        remaining = int(pause_until - time.time())
+        logging.info(f"{symbol} est en pause suite à des erreurs répétées. Reprise dans {remaining}s.")
+        return
+    elif pause_until:
+        current_state.pop('pause_until', None)
     
     ohlcv = get_ohlcv(exchange, symbol, CANDLE_PERIOD, 200)
     if ohlcv is None or len(ohlcv) < max(MA_LONG_PERIOD, RSI_PERIOD, BB_PERIOD, ATR_PERIOD):
         current_state['consecutive_api_failures'] += 1
         if current_state['consecutive_api_failures'] >= 5:
-            logging.critical(f"Trop d'échecs API consécutifs pour {symbol}. Le bot se met en pause.")
-            time.sleep(3600)
+            logging.critical(f"Trop d'échecs API consécutifs pour {symbol}. Ce symbole sera ignoré pendant 1 heure.")
+            current_state['pause_until'] = time.time() + 3600
             current_state['consecutive_api_failures'] = 0
         logging.warning(f"Pas assez de données historiques pour l'analyse de {symbol}. En attente.")
         return
     else:
         current_state['consecutive_api_failures'] = 0
+        current_state.pop('pause_until', None)
 
     closes = np.array([candle[4] for candle in ohlcv], dtype=float)
     highs = np.array([candle[2] for candle in ohlcv], dtype=float)
@@ -296,25 +319,34 @@ def main():
             'secret': SECRET_KEY,
             'enableRateLimit': True,
         })
-        exchange.load_markets()
+        try:
+            exchange.load_markets()
+        except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.RequestTimeout) as e:
+            logging.critical(f"Impossible de charger les marchés depuis Binance : {e}. Le bot s'arrête.")
+            return
         logging.info("Connexion à Binance réussie. Lancement du bot de trading...")
-        
-        while True:
-            balance = get_account_balance(exchange)
-            if not balance:
-                logging.error("Impossible de récupérer le solde. Nouvel essai au prochain cycle.")
-                time.sleep(CHECK_INTERVAL_SECONDS)
-                continue
-            
-            log_current_balances(balance, SYMBOLS)
 
-            for symbol in SYMBOLS:
-                run_bot_logic(exchange, symbol, state, balance)
-                time.sleep(1) # Ajoute un petit délai entre les requêtes pour chaque symbole
-            
-            save_state(state)
-            logging.info(f"Prochaine analyse dans {CHECK_INTERVAL_SECONDS} secondes...")
-            time.sleep(CHECK_INTERVAL_SECONDS)
+        while True:
+            try:
+                balance = get_account_balance(exchange)
+                if not balance:
+                    logging.error("Impossible de récupérer le solde. Nouvel essai au prochain cycle.")
+                    time.sleep(CHECK_INTERVAL_SECONDS)
+                    continue
+                
+                log_current_balances(balance, SYMBOLS)
+
+                for symbol in SYMBOLS:
+                    run_bot_logic(exchange, symbol, state, balance)
+                    time.sleep(1) # Ajoute un petit délai entre les requêtes pour chaque symbole
+                
+                save_state(state)
+                logging.info(f"Prochaine analyse dans {CHECK_INTERVAL_SECONDS} secondes...")
+                time.sleep(CHECK_INTERVAL_SECONDS)
+            except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
+                logging.error(f"Erreur réseau temporaire dans la boucle principale : {e}. Nouvel essai dans {CHECK_INTERVAL_SECONDS}s.")
+                save_state(state)
+                time.sleep(CHECK_INTERVAL_SECONDS)
 
     except Exception as e:
         logging.critical(f"Une erreur fatale est survenue : {e}. Le bot s'arrête.")
