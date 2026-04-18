@@ -361,8 +361,8 @@ def main():
     try:
         try:
             exchange = create_exchange(API_KEY, SECRET_KEY, EXCHANGE_TIMEOUT)
-        except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.RequestTimeout):
-            logging.critical("Le bot s'arrête faute de connexion à Binance.")
+        except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.RequestTimeout) as e:
+            logging.critical(f"Le bot s'arrête faute de connexion à Binance : {e}")
             return
         logging.info("Lancement du bot de trading...")
 

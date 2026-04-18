@@ -2,7 +2,7 @@
 api_connector.py — Factory de connexion à l'échange via ccxt.
 
 Fournit une fonction unique ``create_exchange`` pour instancier et initialiser
-la connexion à Binance (ou tout autre échange supporté par ccxt).  En centralisant
+la connexion à Binance (ou tout autre échange supporté par ccxt). En centralisant
 la création de l'échange ici, les paramètres de connexion (clés API, timeout,
 rate-limit…) sont définis en un seul endroit, ce qui facilite les tests et les
 changements de configuration.
