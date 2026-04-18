@@ -30,6 +30,8 @@ TRANSACTION_FEES = 0.002
 POSITION_SIZE_PERCENTAGE = 0.1  # Plafond : max 10 % du capital par trade
 RISK_PER_TRADE_PERCENTAGE = 0.01  # 1 % du capital total risqué par trade (position sizing ATR)
 EXCHANGE_TIMEOUT = 30000  # Timeout CCXT en millisecondes (30 s)
+CIRCUIT_BREAKER_DAILY_LOSS_PCT = 0.05   # Arrêt automatique si perte ≥ 5 % du capital en 24 h
+CIRCUIT_BREAKER_WINDOW_SECONDS = 86400  # Durée de la fenêtre de référence : 24 h
 STATE_FILE = 'bot_state.json'
 TRADE_HISTORY_FILE = 'trade_history.csv'
 PAPER_TRADING_MODE = False # Mettre à True pour simuler les trades sans risques
@@ -62,6 +64,14 @@ def _default_symbol_state():
         'consecutive_api_failures': 0
     }
 
+def _default_circuit_breaker_state():
+    """Retourne l'état initial du disjoncteur de perte journalière."""
+    return {
+        'reference_balance': 0.0,   # Solde USDT de référence au début de la fenêtre
+        'reference_time': 0.0,      # Timestamp UNIX du début de la fenêtre
+        'triggered_until': 0.0,     # Timestamp UNIX de fin de suspension (0 = inactif)
+    }
+
 def load_state():
     """Charge l'état du bot depuis un fichier JSON. Initialise l'état si le fichier n'existe pas."""
     state = {}
@@ -73,8 +83,10 @@ def load_state():
         logging.error(f"Erreur lors du chargement de l'état du bot : {e}")
 
     # Supprimer les clés orphelines de premier niveau qui ne correspondent à aucun symbole actif
-    # (p. ex. restes d'une ancienne version du fichier d'état)
-    orphan_keys = [k for k in list(state.keys()) if k not in SYMBOLS]
+    # (p. ex. restes d'une ancienne version du fichier d'état).
+    # La clé "circuit_breaker" est préservée intentionnellement.
+    KNOWN_TOP_LEVEL_KEYS = {'circuit_breaker'}
+    orphan_keys = [k for k in list(state.keys()) if k not in SYMBOLS and k not in KNOWN_TOP_LEVEL_KEYS]
     for k in orphan_keys:
         logging.info(f"Nettoyage de la clé d'état orpheline : '{k}'")
         del state[k]
@@ -83,7 +95,71 @@ def load_state():
     for symbol in SYMBOLS:
         if symbol not in state:
             state[symbol] = _default_symbol_state()
+
+    # Initialiser l'état du disjoncteur s'il est absent
+    if 'circuit_breaker' not in state:
+        state['circuit_breaker'] = _default_circuit_breaker_state()
+
     return state
+
+def check_circuit_breaker(state, total_usdt):
+    """Vérifie le disjoncteur de perte journalière sur le solde USDT total.
+
+    Retourne True si le trading doit être suspendu, False sinon.
+    La fenêtre de référence est glissante sur CIRCUIT_BREAKER_WINDOW_SECONDS (24 h).
+    Si la perte dépasse CIRCUIT_BREAKER_DAILY_LOSS_PCT (5 %), le bot suspend tous
+    les nouveaux ordres jusqu'à la fin de la fenêtre courante.
+    """
+    cb = state.setdefault('circuit_breaker', _default_circuit_breaker_state())
+    now = time.time()
+
+    # Le disjoncteur est déjà déclenché : vérifier si la suspension est toujours active
+    if cb['triggered_until'] > now:
+        remaining = int(cb['triggered_until'] - now)
+        logging.warning(
+            f"DISJONCTEUR ACTIF : trading suspendu pendant encore {remaining}s "
+            f"({remaining // 3600}h {(remaining % 3600) // 60}min)."
+        )
+        return True
+    elif cb['triggered_until'] > 0:
+        # La période de suspension vient d'expirer : réinitialiser
+        logging.info("Disjoncteur réinitialisé. Le trading reprend avec un nouveau solde de référence.")
+        cb['triggered_until'] = 0.0
+        cb['reference_balance'] = total_usdt
+        cb['reference_time'] = now
+        return False
+
+    # Nouvelle fenêtre de 24 h ou premier démarrage : enregistrer le solde de référence
+    if cb['reference_balance'] <= 0 or (now - cb['reference_time']) >= CIRCUIT_BREAKER_WINDOW_SECONDS:
+        if cb['reference_balance'] > 0:
+            logging.info(
+                f"Nouvelle fenêtre de 24 h. Solde de référence mis à jour : {total_usdt:.2f} USDT"
+            )
+        cb['reference_balance'] = total_usdt
+        cb['reference_time'] = now
+        return False
+
+    # Calculer la perte par rapport au solde de référence (reference_balance > 0 garanti ci-dessus)
+    if cb['reference_balance'] <= 0:
+        return False
+    loss_pct = (cb['reference_balance'] - total_usdt) / cb['reference_balance']
+    if loss_pct >= CIRCUIT_BREAKER_DAILY_LOSS_PCT:
+        suspension_end = cb['reference_time'] + CIRCUIT_BREAKER_WINDOW_SECONDS
+        cb['triggered_until'] = suspension_end
+        logging.critical(
+            f"DISJONCTEUR DÉCLENCHÉ : perte de {loss_pct * 100:.2f}% sur 24 h "
+            f"(référence : {cb['reference_balance']:.2f} USDT → actuel : {total_usdt:.2f} USDT). "
+            f"Seuil autorisé : {CIRCUIT_BREAKER_DAILY_LOSS_PCT * 100:.0f}%. "
+            f"Trading suspendu jusqu'à la fin de la fenêtre courante."
+        )
+        return True
+
+    logging.info(
+        f"Disjoncteur OK — perte 24 h : {loss_pct * 100:.2f}% "
+        f"(seuil : {CIRCUIT_BREAKER_DAILY_LOSS_PCT * 100:.0f}%)"
+    )
+    return False
+
 
 def get_ohlcv(exchange, symbol, timeframe, limit):
     """Récupère les données OHLCV pour un symbole donné."""
@@ -375,6 +451,13 @@ def main():
                     continue
                 
                 log_current_balances(balance, SYMBOLS)
+
+                # --- DISJONCTEUR DE PERTE JOURNALIÈRE ---
+                usdt_total = get_balance_for_currency(balance, 'USDT')['total']
+                if check_circuit_breaker(state, usdt_total):
+                    save_state(state)
+                    time.sleep(CHECK_INTERVAL_SECONDS)
+                    continue
 
                 for symbol in SYMBOLS:
                     run_bot_logic(exchange, symbol, state, balance)
