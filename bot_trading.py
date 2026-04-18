@@ -6,6 +6,9 @@ import os
 import logging
 import json
 import csv
+import threading
+import requests
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from api_connector import create_exchange
@@ -32,28 +35,57 @@ RISK_PER_TRADE_PERCENTAGE = 0.01  # 1 % du capital total risqué par trade (posi
 EXCHANGE_TIMEOUT = 30000  # Timeout CCXT en millisecondes (30 s)
 CIRCUIT_BREAKER_DAILY_LOSS_PCT = 0.05   # Arrêt automatique si perte ≥ 5 % du capital en 24 h
 CIRCUIT_BREAKER_WINDOW_SECONDS = 86400  # Durée de la fenêtre de référence : 24 h
+CIRCUIT_BREAKER_SUSPENSION_SECONDS = 3600  # Durée de la suspension lors du déclenchement (1 h)
 STATE_FILE = 'bot_state.json'
 TRADE_HISTORY_FILE = 'trade_history.csv'
 PAPER_TRADING_MODE = False # Mettre à True pour simuler les trades sans risques
 MIN_NOTIONAL_FALLBACK = 10.0 # Valeur de secours pour le montant minimum de transaction
+DUST_BALANCE_THRESHOLD = 0.0001  # Seuil en dessous duquel un solde est considéré nul ("poussière")
+
+# --- ALERTES TELEGRAM ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TIMEOUT_SECONDS = 5  # Délai maximum d'attente pour l'envoi d'une alerte Telegram
+
+# Seuil maximum de perte journalière avant déclenchement du disjoncteur (alias lisible)
+MAX_DAILY_LOSS_PERCENTAGE = CIRCUIT_BREAKER_DAILY_LOSS_PCT
 
 # --- CONFIGURATION DE LA JOURNALISATION (LOGGING) ---
-logging.basicConfig(filename='trading_bot.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+_LOG_FORMAT = '%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s'
+logging.basicConfig(filename='trading_bot.log', level=logging.INFO, format=_LOG_FORMAT)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter(_LOG_FORMAT)
 console_handler.setFormatter(formatter)
 logging.getLogger().addHandler(console_handler)
 
+# --- VERROUS POUR LA CONCURRENCE (ThreadPoolExecutor) ---
+_exchange_lock = threading.Lock()  # Protège les appels réseau à l'échange (non thread-safe)
+_state_lock = threading.Lock()     # Protège les écritures dans bot_state.json
+
+
+def send_telegram(message: str) -> None:
+    """Envoie une alerte Telegram si les variables d'environnement sont définies.
+
+    Silencieux en cas d'erreur pour ne pas interrompre le trading.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, data={'chat_id': TELEGRAM_CHAT_ID, 'text': message}, timeout=TELEGRAM_TIMEOUT_SECONDS)
+    except Exception:
+        pass
+
 # --- FONCTIONS UTILES ---
 def save_state(state):
-    """Sauvegarde l'état du bot dans un fichier JSON."""
-    try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
-    except IOError as e:
-        logging.error(f"Erreur lors de la sauvegarde de l'état du bot : {e}")
+    """Sauvegarde l'état du bot dans un fichier JSON (thread-safe via _state_lock)."""
+    with _state_lock:
+        try:
+            with open(STATE_FILE, 'w') as f:
+                json.dump(state, f, indent=4)
+        except IOError as e:
+            logging.error(f"Erreur lors de la sauvegarde de l'état du bot : {e}")
 
 def _default_symbol_state():
     """Retourne l'état initial par défaut pour un symbole."""
@@ -67,8 +99,8 @@ def _default_symbol_state():
 def _default_circuit_breaker_state():
     """Retourne l'état initial du disjoncteur de perte journalière."""
     return {
-        'reference_balance': 0.0,   # Solde USDT de référence au début de la fenêtre
-        'reference_time': 0.0,      # Timestamp UNIX du début de la fenêtre
+        'daily_start_value': 0.0,   # Valeur du portefeuille au début du jour UTC
+        'reference_time': 0.0,      # Timestamp UNIX du début de la fenêtre de 24 h
         'triggered_until': 0.0,     # Timestamp UNIX de fin de suspension (0 = inactif)
     }
 
@@ -100,20 +132,57 @@ def load_state():
     if 'circuit_breaker' not in state:
         state['circuit_breaker'] = _default_circuit_breaker_state()
 
+    # Migrer l'ancienne clé reference_balance → daily_start_value si nécessaire
+    cb = state['circuit_breaker']
+    if 'reference_balance' in cb and 'daily_start_value' not in cb:
+        cb['daily_start_value'] = cb.pop('reference_balance')
+        logging.info("Migration circuit_breaker : reference_balance → daily_start_value appliquée.")
+
     return state
 
+
+def reconcile_state(exchange, state):
+    """Réconcilie l'état persisté avec les soldes réels de l'exchange au démarrage.
+
+    Pour chaque symbole en état 'BUY', vérifie que le solde base_currency est réel.
+    Si ≈ 0, corrige l'état vers 'SELL' et journalise un WARNING.
+    Appelée une seule fois dans main() après load_state().
+    """
+    try:
+        with _exchange_lock:
+            balance = exchange.fetch_balance()
+        if not balance:
+            logging.warning("reconcile_state : impossible de récupérer le solde — réconciliation ignorée.")
+            return
+        for symbol in SYMBOLS:
+            sym_state = state.get(symbol, {})
+            if sym_state.get('last_transaction_type') == 'BUY':
+                base_currency = symbol.split('/')[0]
+                base_total = get_balance_for_currency(balance, base_currency)['total']
+                if base_total < DUST_BALANCE_THRESHOLD:
+                    logging.warning(
+                        f"[Réconciliation] {symbol} : état persisté='BUY' "
+                        f"mais solde {base_currency}={base_total:.8f} ≈ 0. "
+                        f"Correction automatique → 'SELL'."
+                    )
+                    sym_state['last_transaction_type'] = 'SELL'
+                    sym_state['last_buy_price'] = 0.0
+                    sym_state['max_price_since_buy'] = 0.0
+    except Exception as e:
+        logging.error(f"reconcile_state : erreur lors de la réconciliation : {e}")
+
 def check_circuit_breaker(state, total_usdt):
-    """Vérifie le disjoncteur de perte journalière sur le solde USDT total.
+    """Vérifie le disjoncteur de perte journalière (drawdown).
 
     Retourne True si le trading doit être suspendu, False sinon.
     La fenêtre de référence est glissante sur CIRCUIT_BREAKER_WINDOW_SECONDS (24 h).
-    Si la perte dépasse CIRCUIT_BREAKER_DAILY_LOSS_PCT (5 %), le bot suspend tous
-    les nouveaux ordres jusqu'à la fin de la fenêtre courante.
+    Si (daily_start_value - valeur_actuelle) / daily_start_value > MAX_DAILY_LOSS_PERCENTAGE,
+    le bot suspend tous les nouveaux ordres pendant 3 600 secondes.
     """
     cb = state.setdefault('circuit_breaker', _default_circuit_breaker_state())
     now = time.time()
 
-    # Le disjoncteur est déjà déclenché : vérifier si la suspension est toujours active
+    # Le disjoncteur est déjà déclenché
     if cb['triggered_until'] > now:
         remaining = int(cb['triggered_until'] - now)
         logging.warning(
@@ -125,46 +194,46 @@ def check_circuit_breaker(state, total_usdt):
         # La période de suspension vient d'expirer : réinitialiser
         logging.info("Disjoncteur réinitialisé. Le trading reprend avec un nouveau solde de référence.")
         cb['triggered_until'] = 0.0
-        cb['reference_balance'] = total_usdt
+        cb['daily_start_value'] = total_usdt
         cb['reference_time'] = now
         return False
 
-    # Nouvelle fenêtre de 24 h ou premier démarrage : enregistrer le solde de référence
-    if cb['reference_balance'] <= 0 or (now - cb['reference_time']) >= CIRCUIT_BREAKER_WINDOW_SECONDS:
-        if cb['reference_balance'] > 0:
+    # Nouvelle fenêtre de 24 h ou premier démarrage : enregistrer la valeur de référence
+    if cb['daily_start_value'] <= 0 or (now - cb['reference_time']) >= CIRCUIT_BREAKER_WINDOW_SECONDS:
+        if cb['daily_start_value'] > 0:
             logging.info(
-                f"Nouvelle fenêtre de 24 h. Solde de référence mis à jour : {total_usdt:.2f} USDT"
+                f"Nouvelle fenêtre de 24 h. Valeur journalière de référence mise à jour : {total_usdt:.2f} USDT"
             )
-        cb['reference_balance'] = total_usdt
+        cb['daily_start_value'] = total_usdt
         cb['reference_time'] = now
         return False
 
-    # Calculer la perte par rapport au solde de référence (reference_balance > 0 garanti ci-dessus)
-    if cb['reference_balance'] <= 0:
-        return False
-    loss_pct = (cb['reference_balance'] - total_usdt) / cb['reference_balance']
-    if loss_pct >= CIRCUIT_BREAKER_DAILY_LOSS_PCT:
-        suspension_end = cb['reference_time'] + CIRCUIT_BREAKER_WINDOW_SECONDS
-        cb['triggered_until'] = suspension_end
-        logging.critical(
+    # Calculer le drawdown journalier par rapport à daily_start_value
+    loss_pct = (cb['daily_start_value'] - total_usdt) / cb['daily_start_value']
+    if loss_pct >= MAX_DAILY_LOSS_PERCENTAGE:
+        cb['triggered_until'] = now + CIRCUIT_BREAKER_SUSPENSION_SECONDS
+        msg = (
             f"DISJONCTEUR DÉCLENCHÉ : perte de {loss_pct * 100:.2f}% sur 24 h "
-            f"(référence : {cb['reference_balance']:.2f} USDT → actuel : {total_usdt:.2f} USDT). "
-            f"Seuil autorisé : {CIRCUIT_BREAKER_DAILY_LOSS_PCT * 100:.0f}%. "
-            f"Trading suspendu jusqu'à la fin de la fenêtre courante."
+            f"(référence : {cb['daily_start_value']:.2f} USDT → actuel : {total_usdt:.2f} USDT). "
+            f"Seuil autorisé : {MAX_DAILY_LOSS_PERCENTAGE * 100:.0f}%. "
+            f"Trading suspendu pendant {CIRCUIT_BREAKER_SUSPENSION_SECONDS // 60} minutes."
         )
+        logging.critical(msg)
+        send_telegram(f"🚨 {msg}")
         return True
 
     logging.info(
         f"Disjoncteur OK — perte 24 h : {loss_pct * 100:.2f}% "
-        f"(seuil : {CIRCUIT_BREAKER_DAILY_LOSS_PCT * 100:.0f}%)"
+        f"(seuil : {MAX_DAILY_LOSS_PERCENTAGE * 100:.0f}%)"
     )
     return False
 
 
 def get_ohlcv(exchange, symbol, timeframe, limit):
-    """Récupère les données OHLCV pour un symbole donné."""
+    """Récupère les données OHLCV pour un symbole donné (thread-safe via _exchange_lock)."""
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        with _exchange_lock:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         return ohlcv
     except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.RequestTimeout) as e:
         logging.error(f"Erreur lors de la récupération des données pour {symbol}: {e}")
@@ -281,9 +350,11 @@ def handle_buy_signal(exchange, symbol, current_state, last_price, atr, balance)
                 }
                 logging.info(f"[MODE SIMULATION] Ordre d'achat simulé pour {symbol}. Montant: {filled_amount:.4f}")
             else:
-                order = exchange.create_market_buy_order(symbol, amount_to_buy)
-                time.sleep(1) # Délai pour que l'ordre soit traité
-                order = exchange.fetch_order(order['id'], symbol)
+                # Acquisition du verrou pour les appels réseau à l'échange (thread-safe)
+                with _exchange_lock:
+                    order = exchange.create_market_buy_order(symbol, amount_to_buy)
+                    time.sleep(1) # Délai pour que l'ordre soit traité
+                    order = exchange.fetch_order(order['id'], symbol)
             
             if order and order.get('filled', 0) > 0:
                 current_state['last_transaction_type'] = 'BUY'
@@ -300,7 +371,12 @@ def handle_buy_signal(exchange, symbol, current_state, last_price, atr, balance)
                     'fees': json.dumps(order.get('fee', {}))
                 }
                 log_trade_to_csv(trade_data)
-                logging.info(f"Ordre d'achat exécuté sur {symbol}. Montant acheté: {order['filled']:.4f}, Prix: {order.get('price', last_price):.2f}")
+                msg = (
+                    f"✅ BUY {symbol} — Prix: {order.get('price', last_price):.2f} "
+                    f"| Montant: {order['filled']:.4f} | Total: {trade_data['total']:.2f} USDT"
+                )
+                logging.info(msg)
+                send_telegram(msg)
             else:
                 logging.warning(f"L'ordre d'achat sur {symbol} n'a pas été exécuté correctement. Le bot reste en mode 'SELL'.")
         except (ccxt.ExchangeError, ccxt.NetworkError, ccxt.RequestTimeout) as e:
@@ -336,9 +412,11 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
                     }
                     logging.info(f"[MODE SIMULATION] Ordre de vente simulé pour {symbol}. Montant: {filled_amount:.4f}")
                 else:
-                    order = exchange.create_market_sell_order(symbol, amount_to_sell)
-                    time.sleep(1) # Délai pour que l'ordre soit traité
-                    order = exchange.fetch_order(order['id'], symbol)
+                    # Acquisition du verrou pour les appels réseau à l'échange (thread-safe)
+                    with _exchange_lock:
+                        order = exchange.create_market_sell_order(symbol, amount_to_sell)
+                        time.sleep(1) # Délai pour que l'ordre soit traité
+                        order = exchange.fetch_order(order['id'], symbol)
 
                 if order and order.get('filled', 0) > 0:
                     sell_price = order.get('price', last_price)
@@ -358,8 +436,12 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
                         'fees': json.dumps(order.get('fee', {}))
                     }
                     log_trade_to_csv(trade_data)
-                    logging.info(f"Ordre de vente exécuté sur {symbol}. Montant vendu: {order['filled']:.4f}, Prix: {sell_price:.2f}")
-                    logging.info(f"P&L réalisé sur {symbol} : {pnl:+.2f} {symbol.split('/')[1]} ({pnl_pct:+.2f}%)")
+                    msg = (
+                        f"🔴 SELL {symbol} — Prix: {sell_price:.2f} "
+                        f"| Montant: {order['filled']:.4f} | P&L: {pnl:+.2f} USDT ({pnl_pct:+.2f}%)"
+                    )
+                    logging.info(msg)
+                    send_telegram(msg)
                 else:
                     logging.warning(f"L'ordre de vente sur {symbol} n'a pas été exécuté correctement. Le bot reste en mode 'BUY'.")
             except (ccxt.ExchangeError, ccxt.NetworkError, ccxt.RequestTimeout) as e:
@@ -403,8 +485,11 @@ def run_bot_logic(exchange, symbol, state, balance):
     lows_c = lows[:-1]
     
     try:
-        ma_short = talib.SMA(closes_c, timeperiod=MA_SHORT_PERIOD)[-1]
-        ma_long = talib.SMA(closes_c, timeperiod=MA_LONG_PERIOD)[-1]
+        # Calcul des tableaux complets pour détecter le croisement sur les 2 dernières bougies
+        ma_short_arr = talib.SMA(closes_c, timeperiod=MA_SHORT_PERIOD)
+        ma_long_arr = talib.SMA(closes_c, timeperiod=MA_LONG_PERIOD)
+        ma_short = ma_short_arr[-1]
+        ma_long = ma_long_arr[-1]
         rsi = talib.RSI(closes_c, timeperiod=RSI_PERIOD)[-1]
         upper_band, _, _ = talib.BBANDS(closes_c, timeperiod=BB_PERIOD, nbdevup=BB_DEVIATIONS, nbdevdn=BB_DEVIATIONS, matype=0)
         upper_band = upper_band[-1]
@@ -413,18 +498,34 @@ def run_bot_logic(exchange, symbol, state, balance):
         logging.error(f"Erreur dans le calcul des indicateurs pour {symbol}: {e}")
         return
 
-    if np.isnan(ma_short) or np.isnan(ma_long) or np.isnan(rsi) or np.isnan(upper_band) or np.isnan(atr):
+    if any(np.isnan(v) for v in [ma_short, ma_long, ma_short_arr[-2], ma_long_arr[-2], rsi, upper_band, atr]):
         logging.warning(f"Indicateurs invalides (NaN) pour {symbol}, passage au cycle suivant.")
         return
 
+    # Garde sur la longueur minimale des tableaux MA pour la détection du croisement
+    if len(ma_short_arr) < 2 or len(ma_long_arr) < 2:
+        logging.warning(f"Tableaux MA trop courts pour {symbol} (len={len(ma_short_arr)}), passage au cycle suivant.")
+        return
+
     last_price = closes_c[-1]  # dernier prix de bougie fermée
-    
-    # Étape 3 : Logique de la stratégie
+
+    # Croisement haussier récent : MA courte était ≤ MA longue, maintenant > MA longue
+    buy_crossover = (ma_short_arr[-2] <= ma_long_arr[-2]) and (ma_short_arr[-1] > ma_long_arr[-1])
+
+    # Logique de la stratégie
     if current_state['last_transaction_type'] == 'BUY':
         current_state['max_price_since_buy'] = max(current_state['max_price_since_buy'], last_price)
         handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance)
     elif current_state['last_transaction_type'] == 'SELL':
-        if ma_short > ma_long and rsi < 70 and last_price < upper_band:
+        # Vérifier le solde disponible avant d'envoyer un signal d'achat
+        quote_currency = symbol.split('/')[1]
+        free_quote = get_balance_for_currency(balance, quote_currency)['free']
+        if free_quote <= MIN_NOTIONAL_FALLBACK:
+            logging.warning(
+                f"{symbol} : solde {quote_currency} libre insuffisant "
+                f"({free_quote:.2f} ≤ {MIN_NOTIONAL_FALLBACK}). Signal d'achat ignoré."
+            )
+        elif buy_crossover and rsi < 70 and last_price < upper_band:
             handle_buy_signal(exchange, symbol, current_state, last_price, atr, balance)
 
 def main():
@@ -442,6 +543,10 @@ def main():
             return
         logging.info("Lancement du bot de trading...")
 
+        # Réconciliation unique de l'état persisté avec les soldes réels au démarrage
+        reconcile_state(exchange, state)
+        save_state(state)
+
         while True:
             try:
                 balance = get_account_balance(exchange)
@@ -452,16 +557,24 @@ def main():
                 
                 log_current_balances(balance, SYMBOLS)
 
-                # --- DISJONCTEUR DE PERTE JOURNALIÈRE ---
+                # --- DISJONCTEUR DE PERTE JOURNALIÈRE (drawdown 24 h) ---
                 usdt_total = get_balance_for_currency(balance, 'USDT')['total']
                 if check_circuit_breaker(state, usdt_total):
                     save_state(state)
-                    time.sleep(CHECK_INTERVAL_SECONDS)
+                    time.sleep(CIRCUIT_BREAKER_SUSPENSION_SECONDS)
                     continue
 
-                for symbol in SYMBOLS:
-                    run_bot_logic(exchange, symbol, state, balance)
-                    time.sleep(1) # Ajoute un petit délai entre les requêtes pour chaque symbole
+                # Traitement parallèle de toutes les paires via ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(len(SYMBOLS), 4)) as executor:
+                    futures = {
+                        executor.submit(run_bot_logic, exchange, symbol, state, balance): symbol
+                        for symbol in SYMBOLS
+                    }
+                    for future, sym in futures.items():
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logging.error(f"Erreur non gérée dans le thread pour {sym} : {e}")
                 
                 save_state(state)
                 logging.info(f"Prochaine analyse dans {CHECK_INTERVAL_SECONDS} secondes...")
@@ -472,7 +585,9 @@ def main():
                 time.sleep(CHECK_INTERVAL_SECONDS)
 
     except Exception as e:
-        logging.critical(f"Une erreur fatale est survenue : {e}. Le bot s'arrête.")
+        msg = f"Une erreur fatale est survenue : {e}. Le bot s'arrête."
+        logging.critical(msg)
+        send_telegram(f"🚨 CRITIQUE: {msg}")
         save_state(state)
         return
 

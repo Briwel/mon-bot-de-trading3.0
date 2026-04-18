@@ -33,6 +33,8 @@ def create_exchange(api_key: str, secret_key: str, timeout_ms: int = 30000) -> c
         'secret': secret_key,
         'enableRateLimit': True,
         'timeout': timeout_ms,
+        # Corrige automatiquement les écarts d'horloge entre le client et Binance
+        'options': {'adjustForTimeDifference': True},
     })
 
     try:
