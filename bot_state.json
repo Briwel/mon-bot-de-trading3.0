@@ -1,8 +1,4 @@
 {
-    "last_transaction_type": "SELL",
-    "last_buy_price": 0.0,
-    "max_price_since_buy": 0.0,
-    "consecutive_api_failures": 0,
     "BTC/USDT": {
         "last_transaction_type": "SELL",
         "last_buy_price": 0.0,
@@ -14,5 +10,10 @@
         "last_buy_price": 3500.25,
         "max_price_since_buy": 4708.06,
         "consecutive_api_failures": 0
+    },
+    "circuit_breaker": {
+        "daily_start_value": 0.0,
+        "reference_time": 0.0,
+        "triggered_until": 0.0
     }
 }

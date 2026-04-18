@@ -39,7 +39,7 @@
                     </svg>
                     Explication du Bot
                 </h2>
-                <p class="text-gray-300">Ce document explique le fonctionnement du bot de trading en direct que nous avons développé. Il est conçu pour automatiser les transactions sur la paire BTC/USDT en se basant sur une stratégie d'analyse technique.</p>
+                <p class="text-gray-300">Ce document explique le fonctionnement du bot de trading en direct que nous avons développé. Il est conçu pour automatiser les transactions sur plusieurs paires (BTC/USDT, ETH/USDT…) en se basant sur une stratégie d'analyse technique combinant moyennes mobiles, RSI, Bandes de Bollinger et ATR.</p>
             </div>
 
             <!-- Code Explanation Section -->
@@ -56,11 +56,15 @@
                     <ul class="list-none space-y-2 pl-4">
                         <li class="flex items-start">
                             <span class="text-green-400 mr-2 flex-shrink-0">•</span>
-                            <span><strong>Récupération des données en temps réel :</strong> Le bot appelle `get_ohlcv()` pour obtenir les dernières données de prix.</span>
+                            <span><strong>Disjoncteur journalier :</strong> Avant chaque cycle, le bot vérifie si la perte sur 24 h dépasse 5 % du capital. Si c'est le cas, tout nouveau trade est suspendu jusqu'à la fin de la fenêtre de 24 h.</span>
                         </li>
                         <li class="flex items-start">
                             <span class="text-green-400 mr-2 flex-shrink-0">•</span>
-                            <span><strong>Calcul des indicateurs :</strong> Il utilise `talib` pour calculer le croisement des moyennes mobiles (`ma_short`, `ma_long`), l'indice de force relative (`rsi`) et les Bandes de Bollinger (`upper_band`, `lower_band`).</span>
+                            <span><strong>Récupération des données en temps réel :</strong> Le bot appelle <code>get_ohlcv()</code> pour obtenir les dernières données de prix (bougies fermées uniquement).</span>
+                        </li>
+                        <li class="flex items-start">
+                            <span class="text-green-400 mr-2 flex-shrink-0">•</span>
+                            <span><strong>Calcul des indicateurs :</strong> Il utilise <code>talib</code> pour calculer le croisement des moyennes mobiles (<code>ma_short</code>, <code>ma_long</code>), l'indice de force relative (<code>rsi</code>), les Bandes de Bollinger (<code>upper_band</code>) et l'ATR (<code>atr</code>) pour le position sizing et le stop-loss dynamique.</span>
                         </li>
                         <li class="flex items-start">
                             <span class="text-green-400 mr-2 flex-shrink-0">•</span>
@@ -132,24 +136,53 @@
                         <li class="flex items-start">
                             <span class="text-red-400 mr-2 flex-shrink-0">•</span>
                             <p>
-                                <strong class="text-red-400">Prise de profit (Take Profit)</strong> : Vente si le prix atteint 5% au-dessus du prix d'achat.
+                                <strong class="text-red-400">Prise de profit (Take Profit)</strong> : Vente si le prix atteint +3 % au-dessus du prix d'achat (+ frais).
                             </p>
                         </li>
                         <li class="flex items-start">
                             <span class="text-red-400 mr-2 flex-shrink-0">•</span>
                             <p>
-                                <strong class="text-red-400">Stop-loss suiveur</strong> : Vente si le prix baisse de plus de 5% par rapport à un sommet atteint.
-                            </p>
-                        </li>
-                        <li class="flex items-start">
-                            <span class="text-red-400 mr-2 flex-shrink-0">•</span>
-                            <p>
-                                <strong class="text-red-400">Inversion de la tendance</strong> : Vente si la MA courte repasse en dessous de la MA longue, ou si le RSI est suracheté.
+                                <strong class="text-red-400">Stop-loss suiveur (ATR)</strong> : Le stop est placé à <em>ATR_MULTIPLIER × ATR</em> sous le plus haut atteint depuis l'achat ; il remonte automatiquement avec le prix (trailing stop dynamique).
                             </p>
                         </li>
                     </ul>
                 </div>
             </div>
+        </div>
+
+        <hr class="my-8 border-gray-700">
+
+        <!-- Circuit Breaker Section -->
+        <div class="p-8 bg-gray-800 rounded-lg border border-yellow-600">
+            <h2 class="text-3xl font-bold text-gray-50 mb-6 border-b-2 border-yellow-500 pb-2 flex items-center">
+                <svg class="w-8 h-8 mr-3 text-yellow-400" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M1 21L12 2l11 19H1zm11-3h2v-2h-2v2zm0-4h2v-4h-2v4z"/>
+                </svg>
+                Disjoncteur de perte journalière
+            </h2>
+            <p class="text-gray-300 mb-4">
+                Un <strong class="text-yellow-400">circuit breaker</strong> automatique surveille le capital USDT toutes les 60 secondes.
+                Si la perte dépasse <strong class="text-yellow-400">5 %</strong> du solde de référence en moins de <strong class="text-yellow-400">24 heures</strong>,
+                tous les nouveaux ordres sont suspendus jusqu'à la fin de la fenêtre courante.
+            </p>
+            <ul class="list-none space-y-3 text-gray-300">
+                <li class="flex items-start">
+                    <span class="text-yellow-400 mr-2 flex-shrink-0">•</span>
+                    <span><strong>Référence glissante :</strong> le solde de référence est remis à jour toutes les 24 h ou après chaque réinitialisation du disjoncteur.</span>
+                </li>
+                <li class="flex items-start">
+                    <span class="text-yellow-400 mr-2 flex-shrink-0">•</span>
+                    <span><strong>Persistance :</strong> l'état du disjoncteur est sauvegardé dans <code class="bg-gray-700 rounded px-1">bot_state.json</code> — il survit aux redémarrages du bot.</span>
+                </li>
+                <li class="flex items-start">
+                    <span class="text-yellow-400 mr-2 flex-shrink-0">•</span>
+                    <span><strong>Reprise automatique :</strong> à l'expiration de la fenêtre, le trading reprend et un nouveau solde de référence est enregistré.</span>
+                </li>
+                <li class="flex items-start">
+                    <span class="text-yellow-400 mr-2 flex-shrink-0">•</span>
+                    <span><strong>Paramètre ajustable :</strong> <code class="bg-gray-700 rounded px-1">CIRCUIT_BREAKER_DAILY_LOSS_PCT</code> dans <code class="bg-gray-700 rounded px-1">bot_trading.py</code> (défaut : 0.05).</span>
+                </li>
+            </ul>
         </div>
     </div>
 </body>
