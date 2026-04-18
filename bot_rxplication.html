@@ -13,7 +13,7 @@
 
             <h1 class="text-4xl md:text-5xl font-extrabold text-white text-center mb-6">Explication du Bot de Trading</h1>
             <p class="text-lg text-gray-400 text-center mb-8">
-                Ce document explique le fonctionnement du bot de trading conçu pour automatiser les transactions sur la paire BTC/USDT en se basant sur une stratégie d'analyse technique.
+                Ce document explique le fonctionnement du bot de trading conçu pour automatiser les transactions sur plusieurs paires (BTC/USDT, ETH/USDT…) en se basant sur une stratégie d'analyse technique combinant MA, RSI, Bandes de Bollinger et ATR.
             </p>
 
             <div class="w-full h-px bg-gray-700 my-8"></div>
@@ -29,16 +29,17 @@
                     <h3 class="text-xl font-semibold text-white mb-3">Stratégie d'Achat</h3>
                     <ul class="list-disc list-inside space-y-2 text-gray-300">
                         <li><strong class="text-green-400">Croisement des Moyennes Mobiles (MA)</strong> : La moyenne mobile à court terme (MA courte, 20 périodes) doit être supérieure à la moyenne mobile à long terme (MA longue, 50 périodes).</li>
-                        <li><strong class="text-green-400">Indice de Force Relative (RSI)</strong> : L'Indice de Force Relative (RSI, 14 périodes) doit être inférieur à 70.</li>
-                        <li><strong class="text-green-400">Indicateur des Bandes de Bollinger</strong> : Le prix actuel doit être inférieur à la bande supérieure des Bandes de Bollinger.</li>
+                        <li><strong class="text-green-400">Indice de Force Relative (RSI)</strong> : L'Indice de Force Relative (RSI, 14 périodes) doit être inférieur à 70 (évite le surachat).</li>
+                        <li><strong class="text-green-400">Bandes de Bollinger</strong> : Le prix actuel doit être inférieur à la bande supérieure.</li>
+                        <li><strong class="text-green-400">Position sizing ATR</strong> : La taille de la position est calculée pour que la distance de stop-loss (ATR_MULTIPLIER × ATR) représente exactement 1 % du capital total, plafonnée à 10 % du capital.</li>
                     </ul>
                 </div>
 
                 <div class="mt-6">
                     <h3 class="text-xl font-semibold text-white mb-3">Stratégie de Vente</h3>
                     <ul class="list-disc list-inside space-y-2 text-gray-300">
-                        <li><strong class="text-red-400">Take Profit</strong> : Le prix actuel atteint un seuil de profit défini, déclenchant la prise de bénéfices.</li>
-                        <li><strong class="text-red-400">Stop Loss</strong> : Le prix chute en dessous d'un seuil de perte prédéfini, ce qui permet de limiter les pertes.</li>
+                        <li><strong class="text-red-400">Take Profit (+3 %)</strong> : Le prix atteint +3 % au-dessus du prix d'achat (+ frais de transaction) ; le bot vend pour encaisser le bénéfice.</li>
+                        <li><strong class="text-red-400">Stop-loss suiveur (ATR)</strong> : Le stop est positionné à <em>ATR_MULTIPLIER × ATR</em> sous le plus haut atteint depuis l'achat. Il remonte automatiquement avec le prix (trailing stop dynamique basé sur la volatilité réelle).</li>
                     </ul>
                 </div>
             </section>
@@ -52,26 +53,30 @@
                     <h3 class="text-xl font-semibold text-white mb-3">1. Structure</h3>
                     <p class="text-gray-300">Le code est organisé en plusieurs fonctions pour une meilleure lisibilité :</p>
                     <ul class="list-disc list-inside space-y-2 text-gray-300 mt-2">
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">load_config()</code> : Charge les paramètres depuis le fichier de configuration.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">load_state()</code> : Charge l'état du bot depuis <code class="bg-gray-700 rounded-md px-1 py-0.5">bot_state.json</code>.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">load_state()</code> : Charge l'état persisté depuis <code class="bg-gray-700 rounded-md px-1 py-0.5">bot_state.json</code> (positions, disjoncteur).</li>
                         <li><code class="bg-gray-700 rounded-md px-1 py-0.5">save_state()</code> : Sauvegarde l'état actuel du bot.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">fetch_data_and_indicators()</code> : Récupère les données et calcule les indicateurs.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">check_buy_signal()</code> : Vérifie les conditions d'achat.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">check_sell_signal()</code> : Vérifie les conditions de vente.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">execute_trade()</code> : Exécute les ordres via l'API.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">run_bot_logic()</code> : Contient la logique principale.</li>
-                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">main()</code> : La fonction principale qui gère le traitement en parallèle.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">check_circuit_breaker()</code> : Vérifie si la perte 24 h dépasse le seuil ; suspend le trading si nécessaire.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">get_ohlcv()</code> : Récupère les données OHLCV depuis Binance (bougies fermées).</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">get_account_balance()</code> : Récupère le solde du compte.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">calculate_position_size_usdt()</code> : Calcule la taille de position via l'ATR (risque constant de 1 %).</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">handle_buy_signal()</code> : Exécute un ordre d'achat si les conditions sont réunies.</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">handle_sell_signal()</code> : Exécute un ordre de vente (TP ou trailing stop ATR).</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">run_bot_logic()</code> : Contient la logique principale par symbole (calcul des indicateurs + signaux).</li>
+                        <li><code class="bg-gray-700 rounded-md px-1 py-0.5">main()</code> : Boucle principale — connexion, disjoncteur, itération sur les paires, sauvegarde d'état.</li>
                     </ul>
                 </div>
                 <div>
                     <h3 class="text-xl font-semibold text-white mb-3">2. Flux d'exécution</h3>
                     <ol class="list-decimal list-inside space-y-2 text-gray-300">
-                        <li><strong class="text-blue-400">Initialisation</strong> : Le bot charge la configuration et se connecte à l'API.</li>
-                        <li><strong class="text-blue-400">Boucle de paires</strong> : Il parcourt chaque paire de trading définie.</li>
-                        <li><strong class="text-blue-400">Récupération des données</strong> : Pour chaque paire, il récupère les données de marché les plus récentes.</li>
-                        <li><strong class="text-blue-400">Analyse des signaux</strong> : Il vérifie les signaux d'achat et de vente.</li>
-                        <li><strong class="text-blue-400">Mise à jour de l'état</strong> : L'état du bot est mis à jour après chaque transaction.</li>
-                        <li><strong class="text-blue-400">Pause</strong> : Le bot se met en veille avant de répéter le processus.</li>
+                        <li><strong class="text-blue-400">Initialisation</strong> : Le bot charge l'état persisté et se connecte à l'API Binance.</li>
+                        <li><strong class="text-blue-400">Récupération du solde</strong> : Le solde USDT est récupéré à chaque cycle.</li>
+                        <li><strong class="text-blue-400">Vérification du disjoncteur</strong> : Si la perte 24 h ≥ 5 %, tous les trades sont suspendus jusqu'à la fin de la fenêtre.</li>
+                        <li><strong class="text-blue-400">Boucle de paires</strong> : Pour chaque paire active (BTC/USDT, ETH/USDT…) :</li>
+                        <li class="ml-4"><strong class="text-blue-400">Récupération des données</strong> : Bougies OHLCV fermées récupérées depuis Binance.</li>
+                        <li class="ml-4"><strong class="text-blue-400">Calcul des indicateurs</strong> : MA20, MA50, RSI14, BB20, ATR14 via TA-Lib.</li>
+                        <li class="ml-4"><strong class="text-blue-400">Analyse des signaux</strong> : Vérification des conditions d'achat ou de déclenchement du TP/trailing stop.</li>
+                        <li><strong class="text-blue-400">Sauvegarde de l'état</strong> : L'état complet (positions + disjoncteur) est écrit dans <code class="bg-gray-700 rounded-md px-1 py-0.5">bot_state.json</code>.</li>
+                        <li><strong class="text-blue-400">Pause</strong> : Le bot attend 60 secondes avant de répéter le processus.</li>
                     </ol>
                 </div>
             </section>
@@ -82,9 +87,12 @@
             <section>
                 <h2 class="text-2xl md:text-3xl font-bold text-white mb-4"><i class="fas fa-shield-alt text-blue-400 mr-2"></i>Résilience et gestion d'erreurs</h2>
                 <ul class="list-disc list-inside space-y-2 text-gray-300">
-                    <li><strong class="text-yellow-400">Variables d'environnement</strong> : Les clés API sont chargées depuis des variables d'environnement pour des raisons de sécurité.</li>
-                    <li><strong class="text-yellow-400">Gestion des erreurs de l'API</strong> : Le bot incrémente un compteur en cas d'échec de l'API. S'il dépasse un seuil, le traitement de la paire est mis en pause sans arrêter le bot.</li>
-                    <li><strong class="text-yellow-400">Gestion des transactions</strong> : Des vérifications sont effectuées avant chaque transaction pour s'assurer que les fonds sont suffisants.</li>
+                    <li><strong class="text-yellow-400">Variables d'environnement</strong> : Les clés API sont chargées depuis des variables d'environnement (<code class="bg-gray-700 rounded-md px-1 py-0.5">BINANCE_API_KEY</code>, <code class="bg-gray-700 rounded-md px-1 py-0.5">BINANCE_SECRET_KEY</code>) pour des raisons de sécurité.</li>
+                    <li><strong class="text-yellow-400">Disjoncteur de perte journalière</strong> : Si le capital USDT baisse de ≥ 5 % sur 24 h, le bot suspend automatiquement tous les nouveaux ordres jusqu'à la fin de la fenêtre courante. L'état est persisté dans <code class="bg-gray-700 rounded-md px-1 py-0.5">bot_state.json</code> pour survivre aux redémarrages.</li>
+                    <li><strong class="text-yellow-400">Pause automatique par symbole</strong> : Après 5 échecs API consécutifs sur une paire, cette paire est mise en pause pendant 1 heure sans arrêter le reste du bot.</li>
+                    <li><strong class="text-yellow-400">Gestion des transactions</strong> : Des vérifications sont effectuées avant chaque ordre (solde disponible, montant minimum <em>min notional</em> de l'échange).</li>
+                    <li><strong class="text-yellow-400">Mode simulation (Paper Trading)</strong> : L'option <code class="bg-gray-700 rounded-md px-1 py-0.5">PAPER_TRADING_MODE = True</code> permet de simuler tous les trades sans aucun ordre réel.</li>
+                    <li><strong class="text-yellow-400">Historique des trades</strong> : Chaque transaction est enregistrée dans <code class="bg-gray-700 rounded-md px-1 py-0.5">trade_history.csv</code> avec horodatage, symbole, type, prix, quantité, total et frais.</li>
                 </ul>
             </section>
         </div>
