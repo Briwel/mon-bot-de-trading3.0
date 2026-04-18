@@ -8,6 +8,8 @@ import json
 import csv
 from datetime import datetime
 
+from api_connector import create_exchange
+
 # --- CONFIGURATION (À REMPLIR) ---
 API_KEY = os.getenv("BINANCE_API_KEY")
 SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
@@ -25,7 +27,9 @@ BB_PERIOD = 20
 BB_DEVIATIONS = 2
 TAKE_PROFIT_PERCENTAGE = 0.03
 TRANSACTION_FEES = 0.002
-POSITION_SIZE_PERCENTAGE = 0.1
+POSITION_SIZE_PERCENTAGE = 0.1  # Plafond : max 10 % du capital par trade
+RISK_PER_TRADE_PERCENTAGE = 0.01  # 1 % du capital total risqué par trade (position sizing ATR)
+EXCHANGE_TIMEOUT = 30000  # Timeout CCXT en millisecondes (30 s)
 STATE_FILE = 'bot_state.json'
 TRADE_HISTORY_FILE = 'trade_history.csv'
 PAPER_TRADING_MODE = False # Mettre à True pour simuler les trades sans risques
@@ -67,6 +71,13 @@ def load_state():
                 state = json.load(f)
     except (IOError, json.JSONDecodeError) as e:
         logging.error(f"Erreur lors du chargement de l'état du bot : {e}")
+
+    # Supprimer les clés orphelines de premier niveau qui ne correspondent à aucun symbole actif
+    # (p. ex. restes d'une ancienne version du fichier d'état)
+    orphan_keys = [k for k in list(state.keys()) if k not in SYMBOLS]
+    for k in orphan_keys:
+        logging.info(f"Nettoyage de la clé d'état orpheline : '{k}'")
+        del state[k]
 
     # S'assurer que chaque symbole actif a bien son entrée (p. ex. si un nouveau symbole est ajouté)
     for symbol in SYMBOLS:
@@ -130,6 +141,29 @@ def log_current_balances(balance, symbols):
                 logging.info(f"{currency}: Total: {bal_info['total']:.6f} | Disponible: {bal_info['free']:.6f}")
     logging.info("--------------------")
 
+def calculate_position_size_usdt(balance, symbol, last_price, atr):
+    """Calcule le montant en devise de cotation à investir basé sur l'ATR (risque constant).
+
+    La taille est déterminée pour que la distance de stop-loss (ATR_MULTIPLIER × ATR)
+    représente exactement RISK_PER_TRADE_PERCENTAGE du capital total.
+    Le résultat est plafonné à POSITION_SIZE_PERCENTAGE du capital pour éviter
+    les positions surdimensionnées en cas de faible volatilité.
+    """
+    quote_currency = symbol.split('/')[1]
+    total_balance = get_balance_for_currency(balance, quote_currency)['total']
+
+    if total_balance <= 0 or atr <= 0 or last_price <= 0:
+        return 0.0
+
+    risk_amount = total_balance * RISK_PER_TRADE_PERCENTAGE
+    stop_distance_units = ATR_MULTIPLIER * atr          # distance stop-loss en unités de base
+    units_to_buy = risk_amount / stop_distance_units    # nb d'unités de base
+    notional = units_to_buy * last_price                # montant en quote currency
+
+    max_notional = total_balance * POSITION_SIZE_PERCENTAGE
+    return min(notional, max_notional)
+
+
 def quantize_amount(exchange, symbol, amount):
     """Arrondit la quantité à la précision requise par l'échange."""
     return exchange.amount_to_precision(symbol, amount)
@@ -138,7 +172,7 @@ def quantize_price(exchange, symbol, price):
     """Arrondit le prix à la précision requise par l'échange."""
     return exchange.price_to_precision(symbol, price)
 
-def handle_buy_signal(exchange, symbol, current_state, last_price, balance):
+def handle_buy_signal(exchange, symbol, current_state, last_price, atr, balance):
     """Gère la logique d'un ordre d'achat."""
     
     quote_currency = symbol.split('/')[1]
@@ -150,7 +184,8 @@ def handle_buy_signal(exchange, symbol, current_state, last_price, balance):
             market = exchange.markets[symbol]
             min_notional = market['limits']['cost']['min'] if 'cost' in market['limits'] and market['limits']['cost']['min'] else MIN_NOTIONAL_FALLBACK
             
-            amount_to_buy_usdt = usdt_balance['free'] * POSITION_SIZE_PERCENTAGE
+            amount_to_buy_usdt = calculate_position_size_usdt(balance, symbol, last_price, atr)
+            logging.info(f"Position sizing ATR pour {symbol} : {amount_to_buy_usdt:.2f} {quote_currency}")
             
             if amount_to_buy_usdt < min_notional:
                 logging.warning(f"Quantité d'achat trop faible ({amount_to_buy_usdt:.2f} {quote_currency}). Min. requis: {min_notional:.2f} {quote_currency}. Ordre annulé.")
@@ -230,6 +265,10 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
                     order = exchange.fetch_order(order['id'], symbol)
 
                 if order and order.get('filled', 0) > 0:
+                    sell_price = order.get('price', last_price)
+                    pnl = (sell_price - current_state['last_buy_price']) * order['filled']
+                    pnl_pct = ((sell_price / current_state['last_buy_price']) - 1) * 100 if current_state['last_buy_price'] > 0 else 0.0
+
                     current_state['last_transaction_type'] = 'SELL'
                     current_state['last_buy_price'] = 0.0
                     current_state['max_price_since_buy'] = 0.0
@@ -237,13 +276,14 @@ def handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance
                         'timestamp': datetime.now().isoformat(),
                         'symbol': symbol,
                         'type': 'SELL',
-                        'price': order.get('price', last_price),
+                        'price': sell_price,
                         'amount': order['filled'],
-                        'total': order['filled'] * order.get('price', last_price),
+                        'total': order['filled'] * sell_price,
                         'fees': json.dumps(order.get('fee', {}))
                     }
                     log_trade_to_csv(trade_data)
-                    logging.info(f"Ordre de vente exécuté sur {symbol}. Montant vendu: {order['filled']:.4f}")
+                    logging.info(f"Ordre de vente exécuté sur {symbol}. Montant vendu: {order['filled']:.4f}, Prix: {sell_price:.2f}")
+                    logging.info(f"P&L réalisé sur {symbol} : {pnl:+.2f} {symbol.split('/')[1]} ({pnl_pct:+.2f}%)")
                 else:
                     logging.warning(f"L'ordre de vente sur {symbol} n'a pas été exécuté correctement. Le bot reste en mode 'BUY'.")
             except (ccxt.ExchangeError, ccxt.NetworkError, ccxt.RequestTimeout) as e:
@@ -280,14 +320,19 @@ def run_bot_logic(exchange, symbol, state, balance):
     closes = np.array([candle[4] for candle in ohlcv], dtype=float)
     highs = np.array([candle[2] for candle in ohlcv], dtype=float)
     lows = np.array([candle[3] for candle in ohlcv], dtype=float)
+
+    # Exclure la bougie en cours (non fermée) pour éviter les faux signaux
+    closes_c = closes[:-1]
+    highs_c = highs[:-1]
+    lows_c = lows[:-1]
     
     try:
-        ma_short = talib.SMA(closes, timeperiod=MA_SHORT_PERIOD)[-1]
-        ma_long = talib.SMA(closes, timeperiod=MA_LONG_PERIOD)[-1]
-        rsi = talib.RSI(closes, timeperiod=RSI_PERIOD)[-1]
-        upper_band, _, _ = talib.BBANDS(closes, timeperiod=BB_PERIOD, nbdevup=BB_DEVIATIONS, nbdevdn=BB_DEVIATIONS, matype=0)
+        ma_short = talib.SMA(closes_c, timeperiod=MA_SHORT_PERIOD)[-1]
+        ma_long = talib.SMA(closes_c, timeperiod=MA_LONG_PERIOD)[-1]
+        rsi = talib.RSI(closes_c, timeperiod=RSI_PERIOD)[-1]
+        upper_band, _, _ = talib.BBANDS(closes_c, timeperiod=BB_PERIOD, nbdevup=BB_DEVIATIONS, nbdevdn=BB_DEVIATIONS, matype=0)
         upper_band = upper_band[-1]
-        atr = talib.ATR(highs, lows, closes, timeperiod=ATR_PERIOD)[-1]
+        atr = talib.ATR(highs_c, lows_c, closes_c, timeperiod=ATR_PERIOD)[-1]
     except Exception as e:
         logging.error(f"Erreur dans le calcul des indicateurs pour {symbol}: {e}")
         return
@@ -296,7 +341,7 @@ def run_bot_logic(exchange, symbol, state, balance):
         logging.warning(f"Indicateurs invalides (NaN) pour {symbol}, passage au cycle suivant.")
         return
 
-    last_price = closes[-1]
+    last_price = closes_c[-1]  # dernier prix de bougie fermée
     
     # Étape 3 : Logique de la stratégie
     if current_state['last_transaction_type'] == 'BUY':
@@ -304,7 +349,7 @@ def run_bot_logic(exchange, symbol, state, balance):
         handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance)
     elif current_state['last_transaction_type'] == 'SELL':
         if ma_short > ma_long and rsi < 70 and last_price < upper_band:
-            handle_buy_signal(exchange, symbol, current_state, last_price, balance)
+            handle_buy_signal(exchange, symbol, current_state, last_price, atr, balance)
 
 def main():
     if not API_KEY or not SECRET_KEY:
@@ -314,17 +359,12 @@ def main():
     state = load_state()
 
     try:
-        exchange = ccxt.binance({
-            'apiKey': API_KEY,
-            'secret': SECRET_KEY,
-            'enableRateLimit': True,
-        })
         try:
-            exchange.load_markets()
-        except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.RequestTimeout) as e:
-            logging.critical(f"Impossible de charger les marchés depuis Binance : {e}. Le bot s'arrête.")
+            exchange = create_exchange(API_KEY, SECRET_KEY, EXCHANGE_TIMEOUT)
+        except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.RequestTimeout):
+            logging.critical("Le bot s'arrête faute de connexion à Binance.")
             return
-        logging.info("Connexion à Binance réussie. Lancement du bot de trading...")
+        logging.info("Lancement du bot de trading...")
 
         while True:
             try:
