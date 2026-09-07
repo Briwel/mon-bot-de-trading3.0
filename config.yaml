@@ -1,0 +1,23 @@
+# Paramètres du bot de trading
+
+trading:
+  symbols: ['BTC/USDT', 'ETH/USDT']
+  check_interval_seconds: 60
+  paper_trading_mode: false
+  min_notional_fallback: 10.0
+  position_size_percentage: 0.1
+  max_daily_loss_pct: 0.05
+
+indicators:
+  candle_period: '1h'
+  ma_short_period: 20
+  ma_long_period: 50
+  rsi_period: 14
+  atr_period: 14
+  atr_multiplier: 2.0
+  bb_period: 20
+  bb_deviations: 2
+
+strategy:
+  take_profit_percentage: 0.03
+  transaction_fees: 0.002

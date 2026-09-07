@@ -8,10 +8,17 @@ import json
 import csv
 import threading
 import requests
+import yaml
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-# ─── CONFIGURATION ────────────────────────────────────────────────────────────
+# ─── CONFIGURATION LOADING ────────────────────────────────────────────────────
+def load_config():
+    with open('config.yaml', 'r') as f:
+        return yaml.safe_load(f)
+
+CONFIG = load_config()
+
 API_KEY    = os.getenv("BINANCE_API_KEY")
 SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 
@@ -20,24 +27,24 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 # ─── PARAMÈTRES DU BOT ────────────────────────────────────────────────────────
-SYMBOLS                  = ['BTC/USDT', 'ETH/USDT']
-CHECK_INTERVAL_SECONDS   = 60
-CANDLE_PERIOD            = '1h'
-MA_SHORT_PERIOD          = 20
-MA_LONG_PERIOD           = 50
-RSI_PERIOD               = 14
-ATR_PERIOD               = 14
-ATR_MULTIPLIER           = 2.0   # Augmenté pour laisser plus de marge au trade
-BB_PERIOD                = 20
-BB_DEVIATIONS            = 2
-TAKE_PROFIT_PERCENTAGE   = 0.03
-TRANSACTION_FEES         = 0.002
-POSITION_SIZE_PERCENTAGE = 0.1
-MAX_DAILY_LOSS_PCT       = 0.05  # Circuit breaker : pause si -5% en 24h
+SYMBOLS                  = CONFIG['trading']['symbols']
+CHECK_INTERVAL_SECONDS   = CONFIG['trading']['check_interval_seconds']
+CANDLE_PERIOD            = CONFIG['indicators']['candle_period']
+MA_SHORT_PERIOD          = CONFIG['indicators']['ma_short_period']
+MA_LONG_PERIOD           = CONFIG['indicators']['ma_long_period']
+RSI_PERIOD               = CONFIG['indicators']['rsi_period']
+ATR_PERIOD               = CONFIG['indicators']['atr_period']
+ATR_MULTIPLIER           = CONFIG['indicators']['atr_multiplier']
+BB_PERIOD                = CONFIG['indicators']['bb_period']
+BB_DEVIATIONS            = CONFIG['indicators']['bb_deviations']
+TAKE_PROFIT_PERCENTAGE   = CONFIG['strategy']['take_profit_percentage']
+TRANSACTION_FEES         = CONFIG['strategy']['transaction_fees']
+POSITION_SIZE_PERCENTAGE = CONFIG['trading']['position_size_percentage']
+MAX_DAILY_LOSS_PCT       = CONFIG['trading']['max_daily_loss_pct']
 STATE_FILE               = 'bot_state.json'
 TRADE_HISTORY_FILE       = 'trade_history.csv'
-PAPER_TRADING_MODE       = False
-MIN_NOTIONAL_FALLBACK    = 10.0
+PAPER_TRADING_MODE       = CONFIG['trading']['paper_trading_mode']
+MIN_NOTIONAL_FALLBACK    = CONFIG['trading']['min_notional_fallback']
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 # Format enrichi : on sait maintenant dans quelle fonction chaque log est émis
@@ -366,12 +373,21 @@ def handle_sell_signal(exchange, symbol: str, current_state: dict, last_price: f
     except (ccxt.ExchangeError, ccxt.NetworkError, ccxt.RequestTimeout) as e:
         logging.error(f"Erreur échange lors de la vente {symbol} : {e}")
 
+from strategy import TradingStrategy
+# ... (rest of imports)
+
+# ─── CONFIGURATION LOADING ────────────────────────────────────────────────────
+# ... (load_config, CONFIG, etc.)
+
+# Initialiser la stratégie
+STRATEGY = TradingStrategy(CONFIG)
+
+# ... (rest of the file until run_bot_logic)
+
 # ─── LOGIQUE PRINCIPALE PAR SYMBOLE ──────────────────────────────────────────
 def run_bot_logic(exchange, symbol: str, state: dict, balance: dict) -> None:
     """
-    Analyse un symbole et exécute la stratégie.
-    Signal d'achat : croisement récent MA courte > MA longue + RSI < 70 + prix < BB haute.
-    Signal de vente : trailing stop-loss ATR ou take-profit.
+    Analyse un symbole et exécute la stratégie via le module TradingStrategy.
     """
     current_state = state[symbol]
 
@@ -392,39 +408,18 @@ def run_bot_logic(exchange, symbol: str, state: dict, balance: dict) -> None:
 
     current_state['consecutive_api_failures'] = 0
 
-    closes = np.array([c[4] for c in ohlcv], dtype=float)
-    highs  = np.array([c[2] for c in ohlcv], dtype=float)
-    lows   = np.array([c[3] for c in ohlcv], dtype=float)
-
-    # Calcul des indicateurs
-    try:
-        ma_short_series = talib.SMA(closes, timeperiod=MA_SHORT_PERIOD)
-        ma_long_series  = talib.SMA(closes, timeperiod=MA_LONG_PERIOD)
-        rsi             = talib.RSI(closes, timeperiod=RSI_PERIOD)[-1]
-        upper_band, _, _= talib.BBANDS(closes, timeperiod=BB_PERIOD, nbdevup=BB_DEVIATIONS, nbdevdn=BB_DEVIATIONS, matype=0)
-        atr             = talib.ATR(highs, lows, closes, timeperiod=ATR_PERIOD)[-1]
-    except Exception as e:
-        logging.error(f"Erreur calcul indicateurs {symbol} : {e}")
-        return
-
-    ma_short_now  = ma_short_series[-1]
-    ma_short_prev = ma_short_series[-2]
-    ma_long_now   = ma_long_series[-1]
-    ma_long_prev  = ma_long_series[-2]
-    upper_band    = upper_band[-1]
-    last_price    = closes[-1]
-
-    # Vérification NaN
-    if any(np.isnan(v) for v in [ma_short_now, ma_short_prev, ma_long_now, ma_long_prev, rsi, upper_band, atr]):
-        logging.warning(f"Indicateurs NaN pour {symbol}, cycle ignoré.")
+    indicators = STRATEGY.calculate_indicators(ohlcv)
+    if not indicators or any(np.isnan(v) for v in indicators.values() if isinstance(v, float)):
+        logging.warning(f"Indicateurs invalides pour {symbol}, cycle ignoré.")
         return
 
     # ── Stratégie de vente ───────────────────────────────────────────────────
     if current_state['last_transaction_type'] == 'BUY':
-        current_state['max_price_since_buy'] = max(current_state['max_price_since_buy'], last_price)
-        handle_sell_signal(exchange, symbol, current_state, last_price, atr, balance)
+        current_state['max_price_since_buy'] = max(current_state['max_price_since_buy'], indicators['last_price'])
+        if STRATEGY.get_sell_signal(indicators, current_state):
+             handle_sell_signal(exchange, symbol, current_state, indicators['last_price'], indicators['atr'], balance)
 
-    # ── Stratégie d'achat (croisement récent requis) ─────────────────────────
+    # ── Stratégie d'achat ────────────────────────────────────────────────────
     elif current_state['last_transaction_type'] == 'SELL':
         # Vérification préalable du solde (évite les appels API inutiles)
         quote_currency = symbol.split('/')[1]
@@ -433,23 +428,14 @@ def run_bot_logic(exchange, symbol: str, state: dict, balance: dict) -> None:
             logging.warning(f"Solde {quote_currency} insuffisant pour {symbol} ({usdt_free:.2f}). Signal ignoré.")
             return
 
-        # Croisement récent : la bougie précédente avait MA courte <= MA longue
-        # et la bougie actuelle a MA courte > MA longue
-        crossover = ma_short_prev <= ma_long_prev and ma_short_now > ma_long_now
-        rsi_ok    = rsi < 70
-        price_ok  = last_price < upper_band
-
-        if crossover and rsi_ok and price_ok:
+        if STRATEGY.get_buy_signal(indicators, current_state):
             logging.info(
-                f"Croisement MA détecté sur {symbol} | MA_court={ma_short_now:.2f} > MA_long={ma_long_now:.2f} | "
-                f"RSI={rsi:.1f} | Prix={last_price:.2f} < BB_haute={upper_band:.2f}"
+                f"Signal d'achat détecté sur {symbol} | MA_court={indicators['ma_short_now']:.2f} > MA_long={indicators['ma_long_now']:.2f} | "
+                f"RSI={indicators['rsi']:.1f} | Prix={indicators['last_price']:.2f} < BB_haute={indicators['upper_band']:.2f}"
             )
-            handle_buy_signal(exchange, symbol, current_state, last_price, balance)
+            handle_buy_signal(exchange, symbol, current_state, indicators['last_price'], balance)
         else:
-            logging.info(
-                f"{symbol} : pas de signal | crossover={crossover} | RSI={rsi:.1f} | "
-                f"prix<BB={price_ok}"
-            )
+            logging.info(f"{symbol} : pas de signal.")
 
 # ─── BOUCLE PRINCIPALE ────────────────────────────────────────────────────────
 def main() -> None:
